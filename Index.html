@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<title>Kennzeichen Game 🚗</title>
+<style>
+  body { font-family: Arial, sans-serif; text-align: center; margin: 20px; transition: background-color 0.5s; }
+  #game, #gallery { display: none; }
+  #photos img { width: 120px; margin: 5px; border: 2px solid #333; border-radius: 8px; cursor: pointer; }
+  button { margin: 5px; padding: 8px; cursor: pointer; border-radius: 8px; }
+  #leaderboard { margin-top: 20px; }
+  .popup { position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+           background: #333; color: white; padding: 10px 20px; border-radius: 8px;
+           opacity: 0; transition: opacity 0.5s; z-index: 1000; }
+</style>
+</head>
+<body>
+<h1>Kennzeichen Game 🚗</h1>
+
+<div id="login">
+  <input type="text" id="username" placeholder="Dein Name eingeben">
+  <button onclick="login()">Anmelden</button>
+  <p id="cameraStatus"></p>
+</div>
+
+<div id="game">
+  <p>Willkommen, <span id="playerName"></span>!</p>
+  <p>Abonnenten: <span id="subs">0</span></p>
+
+  <button onclick="startCamera()">📷 Kamera starten</button>
+  <button onclick="switchCamera()">🔄 Kamera wechseln</button>
+  <button onclick="stopCamera()">❌ Kamera stoppen</button>
+  <br>
+  <video id="video" autoplay playsinline style="width:300px; display:none;"></video>
+  <canvas id="canvas" style="display:none;"></canvas>
+  <br>
+  <button onclick="takePhoto()">📸 Foto machen</button>
+
+  <h3>Navigation</h3>
+  <button onclick="openGallery()">📂 Galerie</button>
+
+  <h3>Rangliste</h3>
+  <div id="leaderboard"></div>
+
+  <h3>Events</h3>
+  <p id="eventStatus">Kein Event aktiv</p>
+</div>
+
+<div id="gallery">
+  <h2>📂 Galerie</h2>
+  <div id="photos"></div>
+  <button onclick="closeGallery()">⬅ Zurück</button>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@4.0.2/dist/tesseract.min.js"></script>
+<script>
+let currentUser = null;
+let subscribers = 0;
+let stream = null;
+let useFrontCamera = false;
+
+// 10 zufällige Events im Monat, je 1 Stunde
+const events = [];
+const now = new Date();
+for (let i=0; i<10; i++) {
+  let eventDate = new Date(now.getFullYear(), now.getMonth(), Math.floor(Math.random()*28)+1,
+                           Math.floor(Math.random()*24), 0, 0);
+  events.push({
+    start: eventDate,
+    end: new Date(eventDate.getTime() + 60*60*1000),
+    name: `Event ${i+1}`,
+    effect: Math.random()>0.5?"2x Abos":"+100 Abos",
+    color: `hsl(${Math.floor(Math.random()*360)},70%,80%)`
+  });
+}
+
+// Login
+async function login() {
+  const name = document.getElementById("username").value.trim();
+  if(!name) return alert("Bitte gib einen Namen ein!");
+  currentUser = name;
+  
+  let save = JSON.parse(localStorage.getItem("save"))||{};
+  if(!save[name]) save[name] = {subs:0, photos:[]};
+  subscribers = save[name].subs;
+  document.getElementById("subs").innerText = subscribers;
+  document.getElementById("playerName").innerText = name;
+  
+  document.getElementById("login").style.display="none";
+  document.getElementById("game").style.display="block";
+  updatePhotos(save[name].photos);
+  updateLeaderboard();
+  
+  // Kamera-Berechtigung prüfen
+  try {
+    await navigator.mediaDevices.getUserMedia({video:true});
+    document.getElementById("cameraStatus").innerText="✅ Kamera darf verwendet werden";
+  } catch {
+    document.getElementById("cameraStatus").innerText="❌ Kamera kann nicht verwendet werden";
+  }
+}
+
+// Kamera-Funktionen
+async function startCamera() {
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({video:{facingMode:useFrontCamera?"user":"environment"}});
+    document.getElementById("video").srcObject=stream;
+    document.getElementById("video").style.display="block";
+  } catch(err){ alert("Kamera konnte nicht gestartet werden: "+err);}
+}
+function stopCamera(){
+  if(stream){ stream.getTracks().forEach(t=>t.stop()); document.getElementById("video").style.display="none"; }
+}
+function switchCamera(){ useFrontCamera=!useFrontCamera; stopCamera(); startCamera(); }
+
+// Foto & Kennzeichen
+async function takePhoto(){
+  const video=document.getElementById("video");
+  if(!video.srcObject) return showPopup("⚠️ Kamera läuft nicht!");
+  const canvas=document.getElementById("canvas");
+  canvas.width=video.videoWidth;
+  canvas.height=video.videoHeight;
+  const ctx=canvas.getContext("2d");
+  ctx.drawImage(video,0,0);
+  
+  const result=await Tesseract.recognize(canvas,'eng');
+  const text=result.data.text.trim();
+  const numbers=text.match(/\d+/g);
+  if(!numbers){ showPopup("❌ Kein Kennzeichen erkannt!"); return; }
+  
+  // Beste Zahl nehmen
+  let maxGain=0, bestNum=0;
+  numbers.forEach(n=>{
+    const num=parseInt(n);
+    if(!isNaN(num)){
+      const gain=calcSubscribers(num);
+      if(gain>maxGain){ maxGain=gain; bestNum=num; }
+    }
+  });
+  
+  subscribers+=maxGain;
+  document.getElementById("subs").innerText=subscribers;
+  showPopup(`Kennzeichen ${bestNum} ➝ +${maxGain} Abos!`);
+  saveProgress({src:canvas.toDataURL("image/png"), gain:maxGain});
+  updatePhotos([{src:canvas.toDataURL("image/png"), gain:maxGain}], true);
+  updateLeaderboard();
+}
+
+// Abos berechnen
+function calcSubscribers(num){
+  const high=[111,222,333,444,555,666,777,888,999,1110,2220];
+  if(high.includes(num)) return 500;
+  if(num<100) return 50;
+  if(num<=999) return 30;
+  if(num<=5000) return 10;
+  return 5;
+}
+
+// Galerie & Speicher
+function updatePhotos(photoList, append=false){
+  const div=document.getElementById("photos");
+  if(!append) div.innerHTML="";
+  photoList.forEach(obj=>{
+    const container=document.createElement("div");
+    const img=document.createElement("img");
+    img.src=obj.src;
+    const info=document.createElement("p");
+    info.innerText="+"+obj.gain+" Abos";
+    const btn=document.createElement("button");
+    btn.innerText="Bild löschen";
+    btn.onclick=()=>deletePhoto(obj);
+    container.appendChild(img);
+    container.appendChild(info);
+    container.appendChild(btn);
+    div.appendChild(container);
+  });
+}
+function deletePhoto(obj){
+  let save=JSON.parse(localStorage.getItem("save"));
+  save[currentUser].photos=save[currentUser].photos.filter(p=>p.src!==obj.src);
+  subscribers-=obj.gain;
+  if(subscribers<0) subscribers=0;
+  save[currentUser].subs=subscribers;
+  localStorage.setItem("save",JSON.stringify(save));
+  document.getElementById("subs").innerText=subscribers;
+  updatePhotos(save[currentUser].photos);
+  updateLeaderboard();
+}
+function saveProgress(photoObj=null){
+  let save=JSON.parse(localStorage.getItem("save"))||{};
+  if(!save[currentUser]) save[currentUser]={subs:0, photos:[]};
+  save[currentUser].subs=subscribers;
+  if(photoObj) save[currentUser].photos.push(photoObj);
+  localStorage.setItem("save",JSON.stringify(save));
+}
+function updateLeaderboard(){
+  let save=JSON.parse(localStorage.getItem("save"))||{};
+  let ranking=Object.entries(save).map(([name,data])=>({name, subs:data.subs}));
+  ranking.sort((a,b)=>b.subs-a.subs);
+  let html="<ol>";
+  ranking.forEach(r=>html+=`<li>${r.name}: ${r.subs} Abos</li>`);
+  html+="</ol>";
+  document.getElementById("leaderboard").innerHTML=html;
+}
+function openGallery(){ document.getElementById("game").style.display="none"; document.getElementById("gallery").style.display="block";}
+function closeGallery(){ document.getElementById("gallery").style.display="none"; document.getElementById("game").style.display="block";}
+
+// Live-Events prüfen
+setInterval(()=>{
+  const now=new Date();
+  let activeEvent=null;
+  events.forEach(ev=>{
+    if(now>=ev.start && now<=ev.end) activeEvent=ev;
+  });
+  const status=document.getElementById("eventStatus");
+  if(activeEvent){
+    status.innerText=`🔥 Event aktiv: ${activeEvent.name} (${activeEvent.effect})`;
+    document.body.style.backgroundColor=activeEvent.color;
+  }else{
+    status.innerText="Kein Event aktiv";
+    document.body.style.backgroundColor="#fff";
+  }
+},1000);
+
+// Popup
+function showPopup(msg){
+  const popup=document.createElement("div");
+  popup.className="popup";
+  popup.innerText=msg;
+  document.body.appendChild(popup);
+  setTimeout(()=>popup.style.opacity=1,10);
+  setTimeout(()=>{
+    popup.style.opacity=0;
+    setTimeout(()=>popup.remove(),500);
+  },2000);
+}
+</script>
+</body>
+</html>
